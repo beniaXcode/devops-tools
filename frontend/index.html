@@ -1,0 +1,189 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>DevOps Tools</title>
+    <style>
+        .container { display: flex; gap: 20px; }
+        .service { flex: 1; padding: 20px; border: 1px solid #ccc; }
+        .history { margin-top: 20px; }
+        .history-item { padding: 10px; border-bottom: 1px solid #eee; cursor: pointer; }
+        .variable-group { margin-bottom: 10px; }
+        .copy-button { margin-left: 10px; }
+        .dockerfile-input { margin-bottom: 10px; }
+        .add-more { margin-top: 5px; }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="service">
+            <h2>Command Generator</h2>
+            <div id="commandForm">
+                <div class="variable-group">
+                    <input type="text" placeholder="Command template (e.g., ssh -i {1} {2}@{3})" id="commandTemplate">
+                </div>
+                <div id="variableInputs"></div>
+                <button onclick="generateCommand()">Generate Command</button>
+            </div>
+            <div class="history">
+                <h3>Command History</h3>
+                <div id="commandHistory"></div>
+            </div>
+        </div>
+
+        <div class="service">
+            <h2>Dockerfile Generator</h2>
+            <div id="dockerfileForm">
+                <div class="dockerfile-input">
+                    <label>FROM:</label>
+                    <input type="text" id="fromInput">
+                </div>
+                <div class="dockerfile-input">
+                    <label>WORKDIR:</label>
+                    <input type="text" id="workdirInput">
+                </div>
+                <div id="copyInputs">
+                    <label>COPY:</label>
+                    <button onclick="addCopyInput()">Add COPY</button>
+                </div>
+                <div id="runInputs">
+                    <label>RUN:</label>
+                    <button onclick="addRunInput()">Add RUN</button>
+                </div>
+                <div id="cmdInputs">
+                    <label>CMD:</label>
+                    <button onclick="addCmdInput()">Add CMD</button>
+                </div>
+                <button onclick="generateDockerfile()">Generate Dockerfile</button>
+                <pre id="dockerfilePreview"></pre>
+                <button onclick="downloadDockerfile()" id="downloadButton" style="display: none;">Download Dockerfile</button>
+            </div>
+            <div class="history">
+                <h3>Dockerfile History</h3>
+                <div id="dockerfileHistory"></div>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        // Command Generator Logic
+        function parseTemplate(template) {
+            const variables = template.match(/\{(\d+)\}/g) || [];
+            return [...new Set(variables.map(v => v.replace(/[{}]/g, '')))];
+        }
+
+        function generateVariableInputs() {
+            const template = document.getElementById('commandTemplate').value;
+            const variables = parseTemplate(template);
+            const container = document.getElementById('variableInputs');
+            container.innerHTML = '';
+            
+            variables.forEach(v => {
+                const div = document.createElement('div');
+                div.className = 'variable-group';
+                div.innerHTML = `
+                    <input type="text" placeholder="Variable ${v}" data-var="${v}">
+                `;
+                container.appendChild(div);
+            });
+        }
+
+        document.getElementById('commandTemplate').addEventListener('input', generateVariableInputs);
+
+        async function generateCommand() {
+            const template = document.getElementById('commandTemplate').value;
+            const variables = {};
+            document.querySelectorAll('[data-var]').forEach(input => {
+                variables[input.dataset.var] = input.value;
+            });
+
+            const response = await fetch('http://localhost:5000/api/generate', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ template, variables })
+            });
+
+            const data = await response.json();
+            updateCommandHistory();
+        }
+
+        async function updateCommandHistory() {
+            const response = await fetch('http://localhost:5000/api/history');
+            const history = await response.json();
+            
+            const container = document.getElementById('commandHistory');
+            container.innerHTML = history.map(item => `
+                <div class="history-item" onclick="copyToClipboard('${item.command}')">
+                    ${item.command}
+                    <button class="copy-button">Copy</button>
+                </div>
+            `).join('');
+        }
+
+        // Dockerfile Generator Logic
+        function addInput(containerId, placeholder) {
+            const container = document.getElementById(containerId);
+            const input = document.createElement('div');
+            input.className = 'dockerfile-input';
+            input.innerHTML = `
+                <input type="text" placeholder="${placeholder}">
+                <button onclick="this.parentElement.remove()">Remove</button>
+            `;
+            container.appendChild(input);
+        }
+
+        const addCopyInput = () => addInput('copyInputs', 'src dest');
+        const addRunInput = () => addInput('runInputs', 'command');
+        const addCmdInput = () => addInput('cmdInputs', 'command');
+
+        async function generateDockerfile() {
+            const data = {
+                from: document.getElementById('fromInput').value,
+                workdir: document.getElementById('workdirInput').value,
+                copy: Array.from(document.querySelectorAll('#copyInputs input')).map(input => {
+                    const [src, dest] = input.value.split(' ');
+                    return { src, dest };
+                }),
+                run: Array.from(document.querySelectorAll('#runInputs input')).map(input => input.value),
+                cmd: Array.from(document.querySelectorAll('#cmdInputs input')).map(input => input.value)
+            };
+
+            const response = await fetch('http://localhost:5001/api/generate', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(data)
+            });
+
+            const result = await response.json();
+            document.getElementById('dockerfilePreview').textContent = result.content;
+            document.getElementById('downloadButton').style.display = 'block';
+            document.getElementById('downloadButton').onclick = () => downloadDockerfile(result.id);
+            updateDockerfileHistory();
+        }
+
+        async function downloadDockerfile(id) {
+            window.location.href = `http://localhost:5001/api/download/${id}`;
+        }
+
+        async function updateDockerfileHistory() {
+            const response = await fetch('http://localhost:5001/api/history');
+            const history = await response.json();
+            
+            const container = document.getElementById('dockerfileHistory');
+            container.innerHTML = history.map(item => `
+                <div class="history-item">
+                    <pre>${item.content}</pre>
+                    <button onclick="downloadDockerfile(${item.id})">Download</button>
+                </div>
+            `).join('');
+        }
+
+        function copyToClipboard(text) {
+            navigator.clipboard.writeText(text);
+        }
+
+        // Initial load
+        updateCommandHistory();
+        updateDockerfileHistory();
+    </script>
+</body>
+</html>

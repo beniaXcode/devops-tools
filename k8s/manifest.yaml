@@ -1,0 +1,261 @@
+# mariadb-deployment.yaml
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: mariadb
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: mariadb
+  template:
+    metadata:
+      labels:
+        app: mariadb
+    spec:
+      containers:
+      - name: mariadb
+        image: mariadb:latest
+        env:
+        - name: MYSQL_ROOT_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: db-secrets
+              key: root-password
+        - name: MYSQL_USER
+          valueFrom:
+            secretKeyRef:
+              name: db-secrets
+              key: username
+        - name: MYSQL_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: db-secrets
+              key: password
+        - name: MYSQL_DATABASE
+          value: "commands_db"
+        ports:
+        - containerPort: 3306
+        volumeMounts:
+        - name: db-data
+          mountPath: /var/lib/mysql
+        - name: init-script
+          mountPath: /docker-entrypoint-initdb.d
+      volumes:
+      - name: db-data
+        persistentVolumeClaim:
+          claimName: mariadb-pvc
+      - name: init-script
+        configMap:
+          name: db-init-script
+---
+# mariadb-service.yaml
+apiVersion: v1
+kind: Service
+metadata:
+  name: mariadb
+spec:
+  selector:
+    app: mariadb
+  ports:
+  - port: 3306
+---
+# mariadb-pvc.yaml
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: mariadb-pvc
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 1Gi
+---
+# command-generator-deployment.yaml
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: command-generator
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: command-generator
+  template:
+    metadata:
+      labels:
+        app: command-generator
+    spec:
+      containers:
+      - name: command-generator
+        image: command-generator:latest
+        ports:
+        - containerPort: 5000
+        env:
+        - name: SQLALCHEMY_DATABASE_URI
+          value: "mysql+pymysql://$(MYSQL_USER):$(MYSQL_PASSWORD)@mariadb/commands_db"
+        envFrom:
+        - secretRef:
+            name: db-secrets
+---
+# command-generator-service.yaml
+apiVersion: v1
+kind: Service
+metadata:
+  name: command-generator
+spec:
+  selector:
+    app: command-generator
+  ports:
+  - port: 5000
+---
+# dockerfile-generator-deployment.yaml
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: dockerfile-generator
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: dockerfile-generator
+  template:
+    metadata:
+      labels:
+        app: dockerfile-generator
+    spec:
+      containers:
+      - name: dockerfile-generator
+        image: dockerfile-generator:latest
+        ports:
+        - containerPort: 5001
+        env:
+        - name: SQLALCHEMY_DATABASE_URI
+          value: "mysql+pymysql://$(MYSQL_USER):$(MYSQL_PASSWORD)@mariadb/dockerfile_db"
+        envFrom:
+        - secretRef:
+            name: db-secrets
+---
+# dockerfile-generator-service.yaml
+apiVersion: v1
+kind: Service
+metadata:
+  name: dockerfile-generator
+spec:
+  selector:
+    app: dockerfile-generator
+  ports:
+  - port: 5001
+---
+# frontend-deployment.yaml
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: frontend
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: frontend
+  template:
+    metadata:
+      labels:
+        app: frontend
+    spec:
+      containers:
+      - name: frontend
+        image: nginx:alpine
+        ports:
+        - containerPort: 80
+        volumeMounts:
+        - name: nginx-config
+          mountPath: /etc/nginx/nginx.conf
+          subPath: nginx.conf
+        - name: frontend-content
+          mountPath: /usr/share/nginx/html
+      volumes:
+      - name: nginx-config
+        configMap:
+          name: nginx-config
+      - name: frontend-content
+        configMap:
+          name: frontend-content
+---
+# frontend-service.yaml
+apiVersion: v1
+kind: Service
+metadata:
+  name: frontend
+spec:
+  selector:
+    app: frontend
+  ports:
+  - port: 80
+---
+# ingress.yaml
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: devops-tools-ingress
+spec:
+  rules:
+  - host: devops-tools.example.com
+    http:
+      paths:
+      - path: /
+        pathType: Prefix
+        backend:
+          service:
+            name: frontend
+            port:
+              number: 80
+---
+# secrets.yaml
+apiVersion: v1
+kind: Secret
+metadata:
+  name: db-secrets
+type: Opaque
+data:
+  root-password: cm9vdHBhc3N3b3Jk  # base64 encoded 'rootpassword'
+  username: dXNlcg==  # base64 encoded 'user'
+  password: cGFzc3dvcmQ=  # base64 encoded 'password'
+---
+# configmap-nginx.yaml
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: nginx-config
+data:
+  nginx.conf: |
+    events {
+      worker_connections 1024;
+    }
+    http {
+      include mime.types;
+      sendfile on;
+      server {
+        listen 80;
+        location / {
+          root /usr/share/nginx/html;
+          try_files $uri $uri/ /index.html;
+        }
+        location /api/command/ {
+          proxy_pass http://command-generator:5000/;
+        }
+        location /api/dockerfile/ {
+          proxy_pass http://dockerfile-generator:5001/;
+        }
+      }
+    }
+---
+# configmap-db-init.yaml
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: db-init-script
+data:
+  init.sql: |
+    CREATE DATABASE IF NOT EXISTS commands_db;
+    CREATE DATABASE IF NOT EXISTS dockerfile_db;
